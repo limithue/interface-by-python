@@ -47,6 +47,7 @@ Python｜Socket｜Threading｜配置分离
 - Consequences：结构清晰、易维护；高并发需限制线程
 
 ### 4. 架构拓扑
+'''mermaid
 graph TD
 A[main.py] --> B[parse_ip]
 A[main.py] --> C[parse_ports]
