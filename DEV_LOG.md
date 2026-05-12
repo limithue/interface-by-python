@@ -54,6 +54,7 @@ A --> C[parse_ports]
 A --> D[PortScanner]
 D --> E[scan_tcp]
 D --> F[is_alive]
+```
 
 ### 5. 多模型对抗审查结论
 - 必须加线程锁保证安全
