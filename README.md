@@ -16,7 +16,6 @@ python -m venv venv
 source venv/bin/activate  # Mac/Linux
 # 或者 venv\Scripts\activate (Windows)
 ```
-# KNOWN ISSUES
 
 ## 🚨 已知问题（原始1.0版本缺陷）
 - 中文模块文件名易导致跨平台导入失败
