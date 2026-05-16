@@ -1,4 +1,3 @@
-```markdown
 # My Python API Project
 
 这是一个基于 Python (FastAPI) 的简单接口项目模板。
@@ -16,7 +15,7 @@
 python -m venv venv
 source venv/bin/activate  # Mac/Linux
 # 或者 venv\Scripts\activate (Windows)
-
+```
 # KNOWN ISSUES
 
 ## 🚨 已知问题（原始版本缺陷）
