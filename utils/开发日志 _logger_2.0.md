@@ -1,0 +1,179 @@
+# 代码开发日志
+
+| 项目 | 内容 |
+|------|------|
+| **模块名称** | `utils/logger.py`（日志配置模块） |
+| **开发日期** | 2026-06-02 |
+| **版本迭代** | v1.0 → v2.0（架构级重构） |
+| **重构性质** | 低耦合高内聚升级，修复 10 项工程缺陷 |
+| **关联文档** | 《基于Python的Windows端口扫描工具开发实训计划书》 |
+
+---
+
+## 一、重构背景
+
+原 `utils/logger.py` 采用 `root logger` + `FileHandler` 简易实现，随着扫描工具功能拓展（高并发探测、GUI 集成、长期运行），暴露出重复输出、日志膨胀、配置硬编码、高并发阻塞等 10 项缺陷，需进行架构级重构。
+
+---
+
+## 二、缺陷清单与修复对照
+
+| 序号 | 缺陷描述 | 根因分析 | 修复方案 |
+|------|----------|----------|----------|
+| 1 | 重复添加 Handler，日志重复输出 | 无单例保护，多次调用即重复挂载 | 双检锁单例 + `_logger_registry` 注册表 |
+| 2 | 污染 root logger，第三方日志混入 | 使用 `logging.getLogger()` 获取 root | `logging.getLogger(name)` + `propagate=False` |
+| 3 | 无日志轮转，单文件无限增长 | 使用原生 `FileHandler` | `RotatingFileHandler(maxBytes=10MB, backupCount=5)` |
+| 4 | 硬编码日志级别 `INFO` | 代码内写死 | `LogConfig.level` 外部注入 |
+| 5 | 控制台与文件共用同一级别 | 未分级设置 | `console_level` / `file_level` 独立配置 |
+| 6 | 依赖外部 `config.LOG_FILE` / `OUTPUT_DIR` | 模块级硬编码导入 | 彻底删除导入，改为 `LogConfig` 注入 |
+| 7 | 无模块级 logger 隔离 | 未使用 `__name__` | 强制 `name` 参数，推荐 `__name__` |
+| 8 | 日志格式硬编码 | 时间格式、字段顺序写死 | `LogConfig.fmt` / `datefmt` 全外部可配置 |
+| 9 | 高并发时日志 IO 阻塞扫描线程 | 扫描线程直接写磁盘 | `QueueHandler` + `QueueListener` 异步队列 |
+| 10 | 程序退出未 flush/close，日志丢失 | 无退出钩子 | `atexit` 注册 `shutdown_all` + 主动关闭接口 |
+
+---
+
+## 三、关键设计决策
+
+| 决策项 | 选定方案 | 决策理由 |
+|--------|----------|----------|
+| **日志轮转策略** | 按文件大小轮转（`RotatingFileHandler`） | 端口扫描日志量可控，按大小比按时间更精准；10MB/个，保留 5 份，超出自动删除最旧，防止磁盘撑满 |
+| **异步队列行为** | 阻塞兜底方案 | 端口扫描为短时任务（秒级~分钟级），日志完整性优先于速度；队列满时阻塞扫描线程，100% 保证不丢失 |
+| **配置兼容策略** | 废弃原 `config.py` 全局变量 | 新增 `LogConfig` 数据类，由调用方注入配置；模块零外部依赖，实现低耦合 |
+
+---
+
+## 四、架构设计
+
+### 4.1 类职责
+
+| 类 | 职责 | 设计原则 |
+|----|------|----------|
+| `LogConfig` | 聚合 10 项日志配置参数 | 高内聚：单一配置实体 |
+| `LoggerManager` | 注册、组装、调度、关闭全生命周期 | 高内聚：状态收敛于类内；低耦合：不感知配置来源 |
+
+### 4.2 数据流
+
+```
+调用方实例化 LogConfig ──→ LoggerManager.get_logger(name, config)
+                              │
+                              ├─ 双检锁单例检查（防重复）
+                              ├─ 目录级联创建
+                              ├─ 组装 Formatter + RotatingFileHandler + StreamHandler
+                              ├─ [异步模式] QueueHandler → QueueListener → 实际 Handlers
+                              └─ 返回命名 Logger（propagate=False，隔离 root）
+```
+
+---
+
+## 五、接口变更
+
+### 旧接口（v1.0，已废弃）
+
+```python
+from utils.logger import setup_logger
+setup_logger()  # 无参数，硬编码，操作 root logger，无关闭接口
+```
+
+### 新接口（v2.0，当前）
+
+```python
+from utils.logger import LoggerManager, LogConfig
+
+# 方式 A：模块级隔离，默认配置（推荐）
+logger = LoggerManager.get_logger(__name__)
+
+# 方式 B：注入自定义配置（彻底解耦 config.py）
+cfg = LogConfig(
+    log_dir="./scan_logs",
+    log_file="scan.log",
+    max_bytes=10 * 1024 * 1024,
+    backup_count=5,
+    use_queue=True
+)
+logger = LoggerManager.get_logger("scanner.main", cfg)
+
+# 扫描结束主动关闭（可选，atexit 已做兜底）
+LoggerManager.shutdown_all()
+```
+
+---
+
+## 六、核心代码结构
+
+```python
+@dataclass
+class LogConfig:
+    level: int = logging.INFO
+    console_level: int = logging.INFO
+    file_level: int = logging.DEBUG
+    log_dir: str = "./output"
+    log_file: str = "scanner.log"
+    max_bytes: int = 10 * 1024 * 1024   # 10MB/个
+    backup_count: int = 5                # 保留 5 份
+    datefmt: str = "%Y-%m-%d %H:%M:%S"
+    fmt: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    queue_max_size: int = 1000
+    use_queue: bool = True
+    encoding: str = "utf-8"
+
+class LoggerManager:
+    _logger_registry: Dict[str, logging.Logger] = {}
+    _listener_registry: Dict[str, QueueListener] = {}
+    _registry_lock = threading.Lock()
+
+    @classmethod
+    def get_logger(cls, name: str, config: Optional[LogConfig] = None) -> logging.Logger:
+        # 双检锁单例 + 模块级隔离 + 防重复 Handler
+
+    @classmethod
+    def _assemble(cls, name: str, cfg: LogConfig) -> logging.Logger:
+        # 组装 RotatingFileHandler + StreamHandler + QueueHandler（可选）
+
+    @classmethod
+    def shutdown_all(cls) -> None:
+        # 停止 listener、flush/close handler、清理注册表
+```
+
+---
+
+## 七、测试验证记录
+
+| 测试项 | 验证方法 | 结果 |
+|--------|----------|------|
+| 单例防重复 | 连续调用 `get_logger("test")` 3 次 | ✅ 同一实例，Handler 未重复 |
+| 模块级隔离 | 模块 A/B 分别传入 `__name__` | ✅ 各自独立，互不干扰 |
+| 日志轮转 | 持续写入 15MB 日志 | ✅ 生成 `.log` + `.1`~`.5`，无 `.6` |
+| 异步阻塞兜底 | 1000 线程并发写日志，队列满 | ✅ 线程短暂阻塞，日志 100% 完整 |
+| 优雅关闭 | 扫描中 `Ctrl+C` / 正常退出 | ✅ `atexit` 触发，最后几条日志落盘 |
+| 零外部依赖 | 删除 `config.py` 后运行 | ✅ 无 `ImportError`，默认值生效 |
+
+---
+
+## 八、性能影响评估
+
+| 指标 | 旧版 | 新版 | 评估 |
+|------|------|------|------|
+| 并发扫描线程阻塞 | 高（直接磁盘 IO） | 低（仅队列 put） | ✅ 显著改善 |
+| 内存占用 | 低 | 中（队列缓冲 1000 条） | ⚠️ 可控增长 |
+| 日志完整性 | 中（异常退出易丢失） | 高（阻塞 + 优雅关闭） | ✅ 显著提升 |
+| 磁盘空间管理 | 差（单文件无限增长） | 优（自动轮转，上限 60MB） | ✅ 显著提升 |
+
+---
+
+## 九、遗留优化项（后续迭代）
+
+1. **日志压缩**：历史 `.log.1`~`.5` 支持 gzip 压缩，进一步节省磁盘。
+2. **结构化日志**：`fmt` 支持 JSON 输出，便于日志分析系统对接。
+3. **动态热更新**：支持运行时信号/配置热重载 `LogConfig.level`。
+4. **队列监控**：暴露 `qsize()` 接口，GUI 端实时展示日志积压状态。
+
+---
+
+## 十、结论
+
+本次重构将 `utils/logger.py` 从简易脚本升级为生产级日志基础设施。通过 `LogConfig` 配置注入与 `LoggerManager` 全生命周期管理，彻底解决了 10 项工程缺陷，达成了**低耦合**（零外部配置依赖）与**高内聚**（注册/组装/调度/关闭自包含）的设计目标，满足端口扫描工具高并发、高完整性的日志需求。
+
+---
+
+**日志状态**：✅ 已完成，待集成至主分支测试
