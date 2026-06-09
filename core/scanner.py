@@ -4,6 +4,14 @@ import subprocess
 import logging
 from typing import Dict
 
+class PortScanner:
+    """
+    核心端口扫描引擎。
+    支持 TCP 全连接扫描与 UDP 探测，具备跨平台 Ping 预检功能。
+    """
+    def __init__(self, timeout: float = 2.0):
+        self.timeout = timeout
+
 logger = logging.getLogger(__name__)
 
 class PortScanner:
