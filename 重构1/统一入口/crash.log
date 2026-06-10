@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "c:\Users\lxc\OneDrive\Desktop\interpface by python\interface-by-python\重构1\统一入口\main.py", line 96, in main
+    from gui.main_window import MainWindow
+ModuleNotFoundError: No module named 'gui'
