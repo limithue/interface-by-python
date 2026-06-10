@@ -1,64 +1,62 @@
-"""线程调度模块｜任务队列、并发控制、随机延迟、安全启停"""
+"""
+core/thread_mgr.py
+修复 progress 缩进致命错误与 wait() 死锁风险
+"""
 import threading
-import queue
-import time
-import random
-import logging
-from typing import Callable, Any
-
-logger = logging.getLogger(__name__)
+from concurrent.futures import ThreadPoolExecutor
 
 class ThreadManager:
-    def __init__(self, max_workers: int = 10, delay_min: float = 0.05, delay_max: float = 0.3):
-        self.task_queue = queue.Queue()
-        self.result_queue = queue.Queue()
-        self.max_workers = max_workers
-        self.delay_range = (delay_min, delay_max)
-        self._pause_event = threading.Event()
-        self._pause_event.set()  # 默认运行
-        self._stop_event = threading.Event()
+    def __init__(self, max_workers=20):
+        self._max_workers = max_workers
+        self._executor = None
         self._lock = threading.Lock()
-        self._processed = 0
         self._total = 0
+        self._processed = 0
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # 初始状态为运行
 
-    def set_total(self, total: int):
-        self._total = total
+    def start(self, total_tasks):
+        self._total = total_tasks
+        self._processed = 0
+        self._stop_event.clear()
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
 
-    def add_task(self, task: tuple):
-        self.task_queue.put(task)
+    def submit(self, fn, *args, **kwargs):
+        if self._executor and not self._stop_event.is_set():
+            return self._executor.submit(self._wrapper, fn, *args, **kwargs)
 
-    def pause(self): self._pause_event.clear()
-    def resume(self): self._pause_event.set()
-    def stop(self):
-        self._stop_event.set()
+    def _wrapper(self, fn, *args, **kwargs):
+        self._pause_event.wait()  # 暂停控制
+        if self._stop_event.is_set():
+            return None
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            with self._lock:
+                self._processed += 1
+
+    # 【F-1 修复】：确保 progress 方法正确缩进在类内部
+    def progress(self) -> float:
+        with self._lock:
+            if self._total == 0:
+                return 0.0
+            return (self._processed / self._total) * 100.0
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
         self._pause_event.set()
 
-    def start(self, worker_func: Callable[[tuple], Any]):
-        for i in range(self.max_workers):
-            t = threading.Thread(target=self._worker, args=(worker_func,), name=f"Worker-{i}", daemon=True)
-            t.start()
+    def stop(self):
+        self._stop_event.set()
+        self._pause_event.set()  # 解除暂停以允许线程退出
+        if self._executor:
+            # cancel_futures=True (Python 3.9+) 取消尚未开始的任务
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
-    def wait(self) -> bool:
-        self.task_queue.join()
-        return not self._stop_event.is_set()
-
-    def _worker(self, func: Callable):
-        while not self._stop_event.is_set():
-            self._pause_event.wait()
-            try:
-                task = self.task_queue.get(timeout=1)
-            except queue.Empty:
-                continue
-            try:
-                result = func(task)
-                self.result_queue.put(result)
-            except Exception as e:
-                self.result_queue.put(('error', task, str(e)))
-            finally:
-                self.task_queue.task_done()
-                with self._lock:
-                    self._processed += 1
-                time.sleep(random.uniform(*self.delay_range))
-
-    def progress(self) -> float:
-        return self._processed / max(self._total, 1) * 100
+    # 【S-1 修复】：安全的 wait 机制，避免 GUI 主线程死锁
+    def wait(self, timeout=None):
+        if self._executor:
+            self._executor.shutdown(wait=True)

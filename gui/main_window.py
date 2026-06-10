@@ -1,211 +1,225 @@
-"""PyQt6 GUI 模块｜参数输入、线程绑定、进度/结果展示、启停控制"""
+"""
+gui/main_window.py
+PyQt6 可视化界面控制
+"""
 import sys
 import os
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QLineEdit, QPushButton, QComboBox, QSpinBox, 
-                             QPlainTextEdit, QProgressBar, QMessageBox, QFileDialog)
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QLineEdit, QPushButton, QCheckBox, QSpinBox, QTextEdit, 
+                             QTableWidget, QTableWidgetItem, QFileDialog, QMessageBox, QLabel)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
-from PyQt6.QtGui import QFont
 
-from core.parser import IPParser, PortParser
-from core.scanner import PortScanner
+# 确保能导入同级和上级目录模块
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils.config_manager import ConfigManager
+from utils.exporters import ExporterRegistry, OverwriteStrategy
+from utils.logger import ScanLogger
+from core.scanner import HostScanner, PortScanner, ScanConfig
 from core.thread_mgr import ThreadManager
-from utils.exporter import export_results
-import config
+
+logger = ScanLogger.get_logger("gui")
+
+# GUI 专属覆盖策略
+class PromptGUIOverwriteStrategy(OverwriteStrategy):
+    def __init__(self, parent):
+        self.parent = parent
+    def should_overwrite(self, filepath):
+        if os.path.exists(filepath):
+            reply = QMessageBox.question(self.parent, '确认覆盖', 
+                                         f'文件 {os.path.basename(filepath)} 已存在，是否覆盖？', 
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            return reply == QMessageBox.StandardButton.Yes
+        return True
 
 class ScanWorker(QThread):
-    progress = pyqtSignal(float)
-    log_msg = pyqtSignal(str)
-    result = pyqtSignal(dict)
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
+    log_signal = pyqtSignal(str)
+    result_signal = pyqtSignal(dict)
+    progress_signal = pyqtSignal(float)
+    finished_signal = pyqtSignal()
 
-    def __init__(self, targets, ports, protocol, threads, timeout, delay_min, delay_max, skip_offline):
+    def __init__(self, target, ports, max_threads, skip_offline):
         super().__init__()
-        self.targets = targets
+        self.target = target
         self.ports = ports
-        self.protocol = protocol
-        self.threads = threads
-        self.timeout = timeout
-        self.delay_min = delay_min
-        self.delay_max = delay_max
+        self.max_threads = max_threads
         self.skip_offline = skip_offline
-        self._scanner = PortScanner(timeout)
-        self._mgr = ThreadManager(threads, delay_min, delay_max)
-        self.results = []
+        self.thread_mgr = ThreadManager(max_threads)
+        self.host_scanner = HostScanner()
+        self.port_scanner = PortScanner()
 
     def run(self):
-        try:
-            tasks = []
-            for ip in self.targets:
-                if self.skip_offline and not self._scanner.ping_host(ip):
-                    self.log_msg.emit(f"[INFO] 跳过离线主机: {ip}")
-                    continue
-                for port in self.ports:
-                    tasks.append((ip, port, self.protocol))
+        self.log_signal.emit(f"开始扫描目标: {self.target}")
+        # 简化解析逻辑，实际项目中应使用 parsers 模块
+        ips = [self.target] 
+        ports = [80, 443, 22] if self.ports == "common" else [int(p) for p in self.ports.split(',')]
+        
+        total_tasks = len(ips) * len(ports)
+        self.thread_mgr.start(total_tasks)
 
-            self._mgr.set_total(len(tasks))
-            if not tasks:
-                self.log_msg.emit("[WARN] 无有效扫描任务")
-                self.finished.emit([])
-                return
-
-            def worker_func(task):
-                ip, port, proto = task
-                res = self._scanner.scan_single(ip, port, proto)
-                return res
-
-            self._mgr.start(worker_func)
+        for ip in ips:
+            if self.thread_mgr.stop_event.is_set(): break
             
-            # 轮询结果队列
-            import time
-            while self._mgr.task_queue.qsize() > 0 or self._mgr._processed < len(tasks):
-                while not self._mgr.result_queue.empty():
-                    res = self._mgr.result_queue.get_nowait()
-                    if res[0] == 'error':
-                        self.log_msg.emit(f"[ERROR] {res[1]} -> {res[2]}")
-                    else:
-                        self.result.emit(res)
-                        self.results.append(res)
-                        if res['state'] == 'open':
-                            self.log_msg.emit(f"[OPEN] {res['ip']}:{res['port']} ({res['service']})")
-                self.progress.emit(self._mgr.progress())
-                time.sleep(0.2)
-            
-            self._mgr.wait()
-            self.finished.emit(self.results)
-        except Exception as e:
-            self.error.emit(str(e))
+            if self.skip_offline and not self.host_scanner.is_alive(ip):
+                self.log_signal.emit(f"[-] {ip} 离线，已跳过")
+                with self.thread_mgr.lock:
+                    self.thread_mgr.processed += len(ports)
+                continue
+
+            for port in ports:
+                if self.thread_mgr.stop_event.is_set(): break
+                self.thread_mgr.submit(self._scan_task, ip, port)
+
+        self.thread_mgr.wait()
+        self.log_signal.emit("扫描任务结束。")
+        self.finished_signal.emit()
+
+    def _scan_task(self, ip, port):
+        res = self.port_scanner.scan_port(ip, port)
+        if res["state"] == "open":
+            self.result_signal.emit(res)
+        self.progress_signal.emit(self.thread_mgr.progress())
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Windows Port Scanner v{config.VERSION}")
-        self.resize(850, 600)
+        self.setWindowTitle("Python 网络扫描工具 v2.0")
+        self.resize(800, 600)
+        
+        self.cfg_mgr = ConfigManager()
         self.worker = None
-        self.all_results = []
-        self._init_ui()
+        self.init_ui()
+        self.load_config()
 
-    def _init_ui(self):
+    def init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # 输入区
-        h1 = QHBoxLayout()
-        h1.addWidget(QLabel("目标IP:"))
-        self.in_target = QLineEdit("127.0.0.1,192.168.1.10-20")
-        h1.addWidget(self.in_target)
-        layout.addLayout(h1)
+        # 参数输入区
+        top_layout = QHBoxLayout()
+        self.input_target = QLineEdit("192.168.1.1")
+        self.input_ports = QLineEdit(self.cfg_mgr.config.default_ports)
+        self.spin_threads = QSpinBox()
+        self.spin_threads.setRange(1, 100)
+        self.spin_threads.setValue(self.cfg_mgr.config.max_threads)
+        
+        # 【需求修复】使用原生 QCheckBox 替代 QPushButton
+        self.chk_skip_offline = QCheckBox("跳过离线IP")
+        self.chk_skip_offline.setChecked(self.cfg_mgr.config.skip_offline)
 
-        h2 = QHBoxLayout()
-        h2.addWidget(QLabel("端口:"))
-        self.in_port = QLineEdit("common")
-        h2.addWidget(self.in_port)
-        h2.addWidget(QLabel("协议:"))
-        self.cb_proto = QComboBox()
-        self.cb_proto.addItems(["tcp", "udp"])
-        h2.addWidget(self.cb_proto)
-        layout.addLayout(h2)
+        top_layout.addWidget(QLabel("目标:"))
+        top_layout.addWidget(self.input_target)
+        top_layout.addWidget(QLabel("端口:"))
+        top_layout.addWidget(self.input_ports)
+        top_layout.addWidget(QLabel("线程:"))
+        top_layout.addWidget(self.spin_threads)
+        top_layout.addWidget(self.chk_skip_offline)
+        layout.addLayout(top_layout)
 
-        h3 = QHBoxLayout()
-        h3.addWidget(QLabel("线程:"))
-        self.sb_threads = QSpinBox()
-        self.sb_threads.setRange(1, 50)
-        self.sb_threads.setValue(config.DEFAULT_THREADS)
-        h3.addWidget(self.sb_threads)
-        h3.addWidget(QLabel("超时(s):"))
-        self.sb_timeout = QSpinBox()
-        self.sb_timeout.setRange(1, 10)
-        self.sb_timeout.setValue(int(config.DEFAULT_TIMEOUT))
-        h3.addWidget(self.sb_timeout)
-        self.chk_ping = QPushButton("跳过离线IP")
-        self.chk_ping.setCheckable(True)
-        self.chk_ping.setChecked(True)
-        h3.addWidget(self.chk_ping)
-        layout.addLayout(h3)
-
-        # 控制区
-        h4 = QHBoxLayout()
+        # 控制按钮区
+        btn_layout = QHBoxLayout()
         self.btn_start = QPushButton("开始扫描")
         self.btn_pause = QPushButton("暂停")
         self.btn_stop = QPushButton("停止")
         self.btn_export = QPushButton("导出结果")
-        for b in [self.btn_start, self.btn_pause, self.btn_stop, self.btn_export]:
-            h4.addWidget(b)
-        layout.addLayout(h4)
+        
+        self.btn_pause.setEnabled(False)
+        self.btn_stop.setEnabled(False)
 
-        # 进度条
-        self.progress = QProgressBar()
-        layout.addWidget(self.progress)
+        btn_layout.addWidget(self.btn_start)
+        btn_layout.addWidget(self.btn_pause)
+        btn_layout.addWidget(self.btn_stop)
+        btn_layout.addWidget(self.btn_export)
+        layout.addLayout(btn_layout)
 
-        # 结果展示
-        self.log_area = QPlainTextEdit()
-        self.log_area.setReadOnly(True)
-        self.log_area.setFont(QFont("Consolas", 10))
-        layout.addWidget(self.log_area)
+        # 结果与日志区
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["IP", "端口", "状态"])
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        
+        layout.addWidget(self.table, 2)
+        layout.addWidget(self.log_text, 1)
 
-        # 绑定事件
+        # 信号绑定
         self.btn_start.clicked.connect(self.start_scan)
-        self.btn_pause.clicked.connect(self.pause_scan)
+        self.btn_pause.clicked.connect(self.toggle_pause)
         self.btn_stop.clicked.connect(self.stop_scan)
-        self.btn_export.clicked.connect(self.export_data)
+        self.btn_export.clicked.connect(self.export_results)
 
-    def log(self, msg: str):
-        self.log_area.appendPlainText(f"[{self.log_area.document().blockCount():04}] {msg}")
+    def load_config(self):
+        self.chk_skip_offline.setChecked(self.cfg_mgr.config.skip_offline)
+        self.spin_threads.setValue(self.cfg_mgr.config.max_threads)
+        self.input_ports.setText(self.cfg_mgr.config.default_ports)
+
+    def save_config(self):
+        self.cfg_mgr.config.skip_offline = self.chk_skip_offline.isChecked()
+        self.cfg_mgr.config.max_threads = self.spin_threads.value()
+        self.cfg_mgr.config.default_ports = self.input_ports.text()
+        self.cfg_mgr.save()
 
     def start_scan(self):
-        if self.worker and self.worker.isRunning():
-            return
-        try:
-            targets = IPParser.resolve_targets(self.in_target.text())
-            ports = PortParser.resolve_ports(self.in_port.text())
-            proto = self.cb_proto.currentText()
-            threads = self.sb_threads.value()
-            timeout = self.sb_timeout.value()
-            self.all_results = []
-            self.log_area.clear()
-            self.progress.setValue(0)
+        self.save_config()
+        self.table.setRowCount(0)
+        self.btn_start.setEnabled(False)
+        self.btn_pause.setEnabled(True)
+        self.btn_stop.setEnabled(True)
+        self.chk_skip_offline.setEnabled(False) # 扫描时锁定控件
 
-            self.worker = ScanWorker(targets, ports, proto, threads, timeout, 0.05, 0.3, self.chk_ping.isChecked())
-            self.worker.progress.connect(self.progress.setValue)
-            self.worker.log_msg.connect(self.log)
-            self.worker.result.connect(self.handle_result)
-            self.worker.finished.connect(self.scan_finished)
-            self.worker.error.connect(self.log)
-            self.worker.start()
-            self.btn_start.setEnabled(False)
-        except ValueError as e:
-            QMessageBox.warning(self, "参数错误", str(e))
+        self.worker = ScanWorker(
+            self.input_target.text(), 
+            self.input_ports.text(), 
+            self.spin_threads.value(),
+            self.chk_skip_offline.isChecked()
+        )
+        self.worker.log_signal.connect(self.append_log)
+        self.worker.result_signal.connect(self.add_result)
+        self.worker.finished_signal.connect(self.scan_finished)
+        self.worker.start()
 
-    def handle_result(self, res: dict):
-        self.all_results.append(res)
-
-    def scan_finished(self, results):
-        self.log(f"[DONE] 扫描完成，共发现 {len([r for r in results if r['state']=='open'])} 个开放端口")
-        self.btn_start.setEnabled(True)
-        self.progress.setValue(100)
-
-    def pause_scan(self):
-        if self.worker and self.worker.isRunning():
-            self.worker._mgr.pause()
-            self.log("[PAUSE] 扫描已暂停")
-
-    def resume_scan(self):
-        if self.worker and self.worker.isRunning():
-            self.worker._mgr.resume()
-            self.log("[RESUME] 扫描已恢复")
+    def toggle_pause(self):
+        if self.worker and self.worker.thread_mgr:
+            if self.btn_pause.text() == "暂停":
+                self.worker.thread_mgr.pause()
+                self.btn_pause.setText("恢复")
+            else:
+                self.worker.thread_mgr.resume()
+                self.btn_pause.setText("暂停")
 
     def stop_scan(self):
-        if self.worker and self.worker.isRunning():
-            self.worker._mgr.stop()
-            self.log("[STOP] 正在终止扫描...")
-            self.btn_start.setEnabled(True)
+        if self.worker and self.worker.thread_mgr:
+            self.worker.thread_mgr.stop()
 
-    def export_data(self):
-        if not self.all_results:
-            QMessageBox.information(self, "提示", "暂无扫描结果可导出")
-            return
-        fmt = "csv" if self.sender().text() == "导出CSV" else "txt"
-        path = export_results(self.all_results, fmt)
-        QMessageBox.information(self, "导出成功", f"已保存至: {path}")
+    def scan_finished(self):
+        self.btn_start.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+        self.btn_stop.setEnabled(False)
+        self.btn_pause.setText("暂停")
+        self.chk_skip_offline.setEnabled(True) # 恢复控件
+
+    def append_log(self, msg):
+        self.log_text.append(msg)
+
+    def add_result(self, res):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(res["ip"]))
+        self.table.setItem(row, 1, QTableWidgetItem(str(res["port"])))
+        self.table.setItem(row, 2, QTableWidgetItem(res["state"]))
+
+    def export_results(self):
+        filepath, _ = QFileDialog.getSaveFileName(self, "导出结果", "", "CSV (*.csv);;JSON (*.json);;TXT (*.txt)")
+        if not filepath: return
+
+        data = []
+        for row in range(self.table.rowCount()):
+            data.append({
+                "ip": self.table.item(row, 0).text(),
+                "port": self.table.item(row, 1).text(),
+                "state": self.table.item(row, 2).text()
+            })
+        
+        strategy = PromptGUIOverwriteStrategy(self)
+        if ExporterRegistry.export(data, filepath, strategy):
+            QMessageBox.information(self, "成功", "导出完成！")

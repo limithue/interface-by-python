@@ -1,68 +1,40 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-配置持久化模块
-职责：封装 JSON 配置的读写与默认值回退
-与 GUI 解耦，不依赖 PyQt6
+utils/config_manager.py
+GUI 配置持久化管理器
 """
-
 import json
 import os
-from typing import Any, Optional
+from dataclasses import dataclass, asdict, fields
 
-
-# ============================================================
-# 1. 配置管理器
-# ============================================================
+@dataclass
+class GUIConfig:
+    skip_offline: bool = True
+    max_threads: int = 20
+    default_ports: str = "common"
+    default_protocol: str = "tcp"
 
 class ConfigManager:
-    """
-    配置持久化管理器
+    def __init__(self, config_file="scan_config.json"):
+        self.config_file = config_file
+        self.config = self.load()
 
-    - 职责单一：仅负责配置的读写与默认值回退
-    - 低耦合：不依赖任何 GUI / 网络 / 扫描模块
-    - 高内聚：所有配置键名、默认值、序列化逻辑集中在此
-    """
-
-    DEFAULTS = {
-        "skip_offline": True,
-        "threads": 10,
-        "timeout": 2,
-        "delay": 0,
-        "protocol": "tcp",
-        "target": "127.0.0.1,192.168.1.1-10",
-        "port": "common",
-        "window_geometry": None,
-    }
-
-    def __init__(self, filepath: str = "scanner_config.json"):
-        self._filepath = filepath
-        self._data: dict = {}
-        self.load()
-
-    def load(self) -> None:
-        """从 JSON 加载配置；文件缺失或损坏时回退到默认值"""
-        if os.path.exists(self._filepath):
+    def load(self) -> GUIConfig:
+        if os.path.exists(self.config_file):
             try:
-                with open(self._filepath, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                # 合并策略：以默认值为基础，用已存值覆盖
-                self._data = {**self.DEFAULTS, **loaded}
-            except (json.JSONDecodeError, OSError, TypeError):
-                self._data = self.DEFAULTS.copy()
-        else:
-            self._data = self.DEFAULTS.copy()
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 兼容旧版本：仅提取 dataclass 中定义的字段
+                    valid_fields = {f.name for f in fields(GUIConfig)}
+                    filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+                    return GUIConfig(**filtered_data)
+            except Exception:
+                pass
+        return GUIConfig()
 
-    def save(self) -> None:
-        """原子化写入配置，异常静默处理避免阻塞 GUI 关闭"""
+    def save(self):
         try:
-            with open(self._filepath, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass  # 无写权限时不阻塞退出流程
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(asdict(self.config), f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"保存配置失败: {e}")
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._data.get(key, default)
-
-    def set(self, key: str, value: Any) -> None:
-        self._data[key] = value
