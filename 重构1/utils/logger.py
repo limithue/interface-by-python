@@ -5,7 +5,9 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
-from utils.path_helper import get_data_path
+# 修改后的代码（相对导入）
+from .path_helper import get_data_path
+
 
 class ScanLogger:
     _loggers = {}

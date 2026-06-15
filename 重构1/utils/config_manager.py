@@ -4,7 +4,7 @@ utils/config_manager.py
 import json
 import os
 from dataclasses import dataclass, asdict, fields
-from utils.path_helper import get_data_path
+from 重构1.utils.path_helper import get_data_path
 
 @dataclass
 class GUIConfig:

@@ -1,3 +1,21 @@
+import sys
+import os
+
+# 1. 获取当前脚本所在目录的上一级目录（即项目根目录 "重构1"）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 2. 将项目根目录添加到 sys.path 的最前面
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# ================= 你的原有代码 =================
+# ... 其他 import ...
+
+# 现在 Python 就能找到 gui 模块了
+from gui.main_window import MainWindow 
+
+
+
 """
 main.py
 项目统一启动入口 (终极防闪退与崩溃诊断版)
