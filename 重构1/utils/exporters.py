@@ -1,3 +1,34 @@
+from dataclasses import dataclass
+
+@dataclass
+class ExportMeta:
+    """导出任务的元数据（补丁类）"""
+    total_records: int = 0
+    file_size_bytes: int = 0
+    file_path: str = ""
+    format_type: str = ""
+    overwrite_strategy: str = "safe"
+
+
+
+
+# 在 utils/exporters.py 顶部添加
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+
+@dataclass
+class ExportMeta:
+    """导出任务的元数据配置"""
+    filename: str                  # 导出文件名（不含后缀）
+    format: str                    # 导出格式 (csv, json, html, xlsx)
+    timestamp: datetime            # 导出时间
+    total_records: int             # 总记录数
+    output_dir: Optional[str] = None # 输出目录
+    overwrite: bool = False        # 是否覆盖同名文件
+
+
+
 """
 utils/exporters.py
 """

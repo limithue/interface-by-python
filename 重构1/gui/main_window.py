@@ -24,9 +24,10 @@ from PyQt6.QtGui import QFont, QColor
 from core.models import ScanConfig, ScanResult, PortState
 from core.ip_parser import resolve_targets
 from core.port_parser import resolve_ports
-from core.scanner import PortScanner
+
 from core.thread_manager import ThreadManager
 from utils.exporters import ExporterRegistry, ExportMeta, OverwriteStrategy
+from core.scanner import PortScanner
 from utils.config_manager import ConfigManager
 import config
 
