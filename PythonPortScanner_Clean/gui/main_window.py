@@ -4,12 +4,23 @@
 图形界面层
 职责：PyQt6 主界面，零业务逻辑，仅负责布局、事件绑定、数据展示
 通过 ScanWorker（QThread）与核心引擎交互，避免界面卡顿
+
+合并说明（v1.2 -> 正式版）：
+1. 保留模块化架构，继续从 core/ 和 utils/ 导入
+2. 吸收 1.2 版改进：
+   - 完善 docstring 和注释
+   - 增强 _set_controls_running 参数输入控件禁用逻辑
+   - 优化 export_data 异常处理粒度
+   - 保持合规提示弹窗
+   - 添加 if __name__ == "__main__" 入口守卫
+   - 完善 type hints
 """
 
 import sys
 import threading
 import time
 import os
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
@@ -400,7 +411,6 @@ class MainWindow(QMainWindow):
         )
 
     def log(self, msg: str) -> None:
-        from datetime import datetime
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_area.appendPlainText(f"[{ts}] {msg}")
 
@@ -571,14 +581,12 @@ class MainWindow(QMainWindow):
                 self, "确认退出", "扫描正在进行中，确定要退出吗？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.worker.stop()
-                self.worker.wait(2000)
-                event.accept()
-            else:
+            if reply == QMessageBox.StandardButton.No:
                 event.ignore()
-        else:
-            event.accept()
+                return
+            self.worker.stop()
+            self.worker.wait(2000)
+        event.accept()
 
 
 def run_gui() -> None:
@@ -587,3 +595,7 @@ def run_gui() -> None:
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    run_gui()

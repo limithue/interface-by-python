@@ -57,7 +57,17 @@ def compliance_prompt() -> None:
 
     控制台输出品红色声明，等待用户输入 yes 确认。
     输入非 yes 则退出程序。
+    GUI 模式（无控制台/stdin）下自动跳过。
     """
+    # 检测是否处于交互式控制台环境
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            print(colored("[INFO] 非交互环境，跳过控制台合规提示", "yellow"))
+            return
+    except Exception:
+        print(colored("[INFO] 非交互环境，跳过控制台合规提示", "yellow"))
+        return
+
     print(colored("=" * 70, "magenta"))
     print(colored("合规提示 | Compliance Notice", "magenta"))
     print(colored("=" * 70, "magenta"))
@@ -68,19 +78,13 @@ def compliance_prompt() -> None:
         choice = input(
             colored("请输入 'yes' 确认您已阅读并同意上述条款: ", "yellow")
         ).strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except (EOFError, KeyboardInterrupt, RuntimeError):
         print(colored("\n输入中断，程序退出。", "red"))
         sys.exit(1)
 
     if choice != "yes":
         print(colored("未确认合规条款，程序退出。", "red"))
         sys.exit(0)
-
-
-# ============================================================
-# 3. 输入解析
-# ============================================================
-
 def parse_ip(text: str) -> List[str]:
     """调用 IPParser.resolve_targets，限制 CIDR 大小"""
     return resolve_targets(text)
@@ -206,17 +210,20 @@ def cli_scan(
     # 大任务量确认
     if total > 1000:
         print(colored(f"\n⚠ 警告: 扫描任务量较大 ({total} 个任务)", "yellow"))
-        try:
-            confirm = input(
-                colored("确认继续扫描? 请输入 'yes': ", "yellow")
-            ).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(colored("\n扫描已取消。", "red"))
-            return []
-        if confirm != "yes":
-            print(colored("扫描已取消。", "red"))
-            return []
-
+        # 非交互环境自动继续
+        if sys.stdin is None or not sys.stdin.isatty():
+            print(colored("[INFO] 非交互环境，自动继续扫描", "yellow"))
+        else:
+            try:
+                confirm = input(
+                    colored("确认继续扫描? 请输入 'yes': ", "yellow")
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt, RuntimeError):
+                print(colored("\n扫描已取消。", "red"))
+                return []
+            if confirm != "yes":
+                print(colored("扫描已取消。", "red"))
+                return []
     print(f"\n[INIT] 任务就绪: {len(targets)} 个IP x {len(ports)} 个端口 = {total} 个任务")
     print(f"[INFO] 线程: {scan_config.threads} | 超时: {scan_config.timeout}s | 协议: {scan_config.protocol}")
     print(colored("=" * 70, "cyan"))
@@ -282,14 +289,22 @@ def interactive_wizard() -> tuple:
     交互式向导模式
 
     引导用户逐步输入扫描参数。
+    非交互环境（无 stdin）下直接报错退出，提示使用命令行参数。
 
     Returns:
         (targets, ports, scan_config)
     """
+    # 检测交互环境
+    if sys.stdin is None or not sys.stdin.isatty():
+        print(colored("\n[ERROR] 交互式向导需要控制台输入，但当前环境无 stdin。", "red"))
+        print(colored("请使用命令行参数启动，例如:", "yellow"))
+        print(colored("  main.exe --target 192.168.1.1 --ports 80,443 --format txt", "cyan"))
+        print(colored("  main.exe --gui  # 启动 GUI 模式", "cyan"))
+        sys.exit(1)
+
     print(colored("\n" + "=" * 70, "cyan"))
     print(colored("  Port Scanner v" + config.VERSION + " - 交互式向导", "cyan"))
     print(colored("=" * 70, "cyan"))
-
     # 目标
     while True:
         target_input = input("\n目标 IP/域名 (支持: 单IP, IP段, CIDR, 逗号分隔): ").strip()

@@ -263,20 +263,16 @@ class TxtExporter(IExporter):
                     f"Port Scan Report | Generated: "
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 )
-                f.write(f"Total Records: {len(records)}
-")
-                f.write("-" * total_width + "
-")
+                f.write(f"Total Records: {len(records)}\n")
+                f.write("-" * total_width + "\n")
 
                 # 表头
                 header_parts = [
                     field.upper().ljust(padded_widths[i])
                     for i, field in enumerate(fields)
                 ]
-                f.write(" ".join(header_parts) + "
-")
-                f.write("-" * total_width + "
-")
+                f.write(" ".join(header_parts) + "\n")
+                f.write("-" * total_width + "\n")
 
                 # 数据行
                 for rec in records:
@@ -284,8 +280,7 @@ class TxtExporter(IExporter):
                         str(rec.get(field, "-")).ljust(padded_widths[i])
                         for i, field in enumerate(fields)
                     ]
-                    f.write(" ".join(row_parts) + "
-")
+                    f.write(" ".join(row_parts) + "\n")
 
             return ExportMeta(
                 filepath=filepath,
